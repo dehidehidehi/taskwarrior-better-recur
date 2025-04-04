@@ -2,6 +2,7 @@
 (c) 2024 by [Scott O'Brien](https://www.scottyob.com/), MIT License
 
 ## Installation
+```
 task config uda.relativeRecurDue.type duration
 task config uda.relativeRecurDue.label 'Rel. Rec. Due'
 task config uda.relativeRecurWait.type duration
@@ -12,7 +13,7 @@ task config uda.completeRecurDue.type string
 task config uda.completeRecurDue.label 'Com. Rec. Due'
 task config uda.completeRecurWait.type string
 task config uda.completeRecurWait.label 'Com. Rec. Wait'
-
+```
 
 ## Relative Recurring Usage
 You shouldn't mow your lawn more than once a week, but want to keep it short, so shouldn't wait for more than two weeks:
