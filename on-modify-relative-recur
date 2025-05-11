@@ -1,83 +1,159 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 import json
+import logging
 import sys
-import subprocess
-import uuid
-import os
 import tempfile
-import time
+import uuid
+from datetime import datetime
+from typing import TypeVar, Generic, Optional, Callable
 
-TIME_FORMAT = "%Y%m%dT%H%M%SZ"
-UDA_DUE = "rdue"
-UDA_WAIT = "rwait"
+from taskw import TaskWarriorShellout
 
-env = os.environ.copy()
-env["TZ"] = "UTC0"
-
-
-# Hand back duration format parsing to task warrior
-def calc(statement):
-    calc = subprocess.Popen(
-        ["task", "rc.verbose=nothing", "rc.date.iso=yes", "calc", statement],
-        stdout=subprocess.PIPE,
-        env=env,
-    )
-    out, err = calc.communicate()
-    # Workaround for TW-1254 (https://bug.tasktools.org/browse/TW-1254)
-    return out.decode("utf-8").rstrip().replace("-", "").replace(":", "") + "Z"
+T = TypeVar('T', covariant=True)
+U = TypeVar('U', covariant=True)
+E = TypeVar('E', bound=BaseException, covariant=True)
 
 
-# Parse the modified task
-original = json.loads(sys.stdin.readline())
-modified = sys.stdin.readline()
-# Return the unmodified modified task, so it is actually changed
-print(modified)
-modified = json.loads(modified)
+class Result(Generic[T, E]):
+    """Essentially allows you to capture and delay exception handling."""
 
-# Has a task with UDA been marked as completed?
-if (
-    (UDA_DUE in original or UDA_WAIT in original)
-    and original["status"] != "completed"
-    and modified["status"] == "completed"
-):
-    del original["modified"]
-    if "start" in original:
-        del original["start"]
-    if UDA_DUE in original:
-        original["due"] = calc(modified["end"] + "+" + original[UDA_DUE])
-    if UDA_WAIT in original:
-        original["wait"] = calc(modified["end"] + "+" + original[UDA_WAIT])
-        original["status"] = "waiting"
-    else:
-        original["status"] = "pending"
-    print("Created follow-up task")
-    original["entry"] = modified["end"]
-    original["uuid"] = str(uuid.uuid4())
+    def __init__(self, _callable: Optional[Callable] = None, throwable: Optional[E] = None):
+        if _callable is None and throwable is None:
+            raise ValueError("_callable and throwable cannot both be none.")
+        if _callable is not None and throwable is not None:
+            raise ValueError("_callable and throwable cannot both be not none.")
+        if throwable:
+            self.__value = None
+            self.__throwable = throwable
+        elif _callable:
+            # Apply callable
+            try:
+                self.__value: Optional[T] = _callable()
+                self.__throwable = None
+            except Exception as e:
+                self.__value = None
+                self.__throwable = e
 
-    # Wait for taskwarrior to finish, so we can safely `task import` the new
-    #   task.
-    sys.stdout.flush()
-    task_pid = os.getppid()
-    if 0 < os.fork():
-        sys.exit(0)
-    else:
-        # Taskwarrior also waits for stdout to close
+    def __str__(self):
+        if self.is_error():
+            return str(self.__throwable)
+        else:
+            return str(self.__value)
+
+    def map(self, function_lambda: Callable[[T], U]) -> 'Result[U, E]':
+        if self.is_error():
+            return Result.of_error(self.get_error())
         try:
-            os.close(sys.stdout.fileno())
-        except OSError:
-            pass  # Thrown because of closing stdout. Don't worry, that's fine.
+            return Result.of(function_lambda(self.get_value()))
+        except Exception as e:
+            return Result.of_error(e)
 
-        # Wait for taskwarrior to finish
-        while os.path.exists("/proc/%s" % str(task_pid)):
-            time.sleep(0.25)
+    def get_value(self) -> T:
+        if not self.is_error():
+            return self.__value
+        raise Exception(f"""
+        Cannot retrieve value on result with error:
+        {self.get_error().__repr__()}
+        """)
 
-        # Import the follow-up task
-        with tempfile.NamedTemporaryFile(mode="wt") as new_task:
-            new_task.write(json.dumps(original))
-            new_task.flush()
-            add = subprocess.Popen(
-                ["task", "rc.verbose=nothing", "import", new_task.name],
-                env=env,
-            )
-            add.communicate()
+    def get_error(self) -> Optional[E]:
+        if self.is_error():
+            return self.__throwable
+        raise Exception("Cannot retrieve error on result without error.")
+
+    def is_error(self) -> bool:
+        return self.__throwable is not None
+
+    @staticmethod
+    def of_error(error: E) -> 'Result[T, E]':
+        return Result(None, error)
+
+    @staticmethod
+    def of(_callable: Callable) -> 'Result[T, E]':
+        return Result(_callable, None)
+
+
+
+class TaskWarriorHook:
+
+    TIME_FORMAT = "%Y%m%dT%H%M%SZ"
+    UDA_DUE = "rdue"
+    UDA_WAIT = "rwait"
+
+    def __init__(self, original: dict, modified: dict):
+        self._original = original
+        self._modified = modified
+        self._tw = TaskWarriorShellout(marshal=False)
+        self._logger = self._make_silent_logger()
+
+    def main(self) -> None:
+        try:
+            self._logger.info("Original: " + str(self._original))
+            self._logger.info("Modified: " + str(self._modified))
+            original = self._original
+            modified = Result.of(self._tw.task_update(self._modified))
+            if modified.is_error():
+                self._logger.exception(modified.get_error())
+                print(modified.get_error())
+                return
+            modified = modified.get_value()
+            print(bytes(modified))
+
+            if (
+                    (self.UDA_DUE in original or self.UDA_WAIT in original)
+                    and original["status"] != "completed"
+                    and modified["status"] == "completed"
+            ):
+                del original["modified"]
+                if "start" in original:
+                    del original["start"]
+                if self.UDA_DUE in original:
+                    original["due"] = self.calc(modified["end"] + "+" + original[self.UDA_DUE])
+                if self.UDA_WAIT in original:
+                    original["wait"] = self.calc(modified["end"] + "+" + original[self.UDA_WAIT])
+                    original["status"] = "waiting"
+                else:
+                    original["status"] = "pending"
+                print("Created follow-up task")
+                original["entry"] = modified["end"]
+                original["uuid"] = str(uuid.uuid4())
+
+                result = Result.of(self._tw.task_add(original))
+                if result.is_error():
+                    self._logger.exception(result.get_error())
+                    print(result.get_error())
+                    return
+        except Exception as e:
+            self._logger.exception(e)
+            print(e)
+        finally:
+            self._logger.info("Done.")
+
+    def calc(self, statement) -> str:
+        """ Hand back duration format parsing to task warrior """
+        stdout, stdin = self._tw._execute(*["rc.verbose=nothing", "rc.date.iso=yes", "calc", statement])
+        return stdout.rstrip().replace("-", "").replace(":", "") + "Z"
+
+    def _make_silent_logger(self) -> logging.Logger:
+        """Only writes to a file, does not print anything to stdout."""
+        logger = logging.getLogger('on-modify-complete-recur')
+        logger.setLevel(logging.DEBUG)
+        file_handler = logging.FileHandler(
+            f"{tempfile.gettempdir()}/on-modify-complete-recur-{datetime.now().strftime('%Y-%m-%d')}.log")
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+        logger.addHandler(file_handler)
+        logger.propagate = False
+        return logger
+
+
+original = json.loads(sys.stdin.readline())
+modified = json.loads(sys.stdin.readline())
+sys.stdin.close()
+TaskWarriorHook(original=original, modified=modified).main()
+
+# if __name__ == '__main__':
+#     tw_hook = TaskWarriorHook()
+#     result = tw_hook.calc("tomorrow")
+#     print(result)
