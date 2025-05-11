@@ -9,16 +9,16 @@ Originally by:
 1. Add the following to your `taskrc` file.
 
 ```
-task config uda.rdue.type duration
-task config uda.rdue.label 'Rel. Rec. Due'
-task config uda.rwait.type duration
-task config uda.rwait.label 'Rel. Rec. Wait'
-task config uda.expires.type string
-task config uda.expires.label 'Expires'
-task config uda.crdue.type string
-task config uda.crdue.label 'Com. Rec. Due'
-task config uda.crwait.type string
-task config uda.crwait.label 'Com. Rec. Wait'
+uda.rdue.type=duration
+uda.rdue.label='Rel. Rec. Due'
+uda.rwait.type=duration
+uda.rwait.label='Rel. Rec. Wait'
+uda.expires.type=string
+uda.expires.label='Expires'
+uda.crdue.type=string
+uda.crdue.label='Com. Rec. Due'
+uda.crwait.type=string
+uda.crwait.label='Com. Rec. Wait'
 ```
 
 ## Relative Recurring Usage
